@@ -8,16 +8,17 @@ import torch
 import torch.nn as nn
 from MCF.quantization.quant_modules import QConv2d, QLinear, QIdentity, Quantizers
 
+
 def get_input_sequences(model, dummy_shape=[1, 3, 224, 224]):
     layer_fuse_pairs = []
 
     def hook(name):
         def func(m, i, o):
-            if m in (torch.nn.Conv2d, torch.nn.Linear):
+            if m in (nn.Conv2d, nn.Linear):
                 if not layer_fuse_pairs:
                     layer_fuse_pairs.append((m, name))
                 else:
-                    if layer_fuse_pairs[-1][0] in (torch.nn.Conv2d, torch.nn.Linear):
+                    if layer_fuse_pairs[-1][0] in (nn.Conv2d, nn.Linear):
                         layer_fuse_pairs.pop()
             else:
                 layer_fuse_pairs.append((m, name))
@@ -32,10 +33,11 @@ def get_input_sequences(model, dummy_shape=[1, 3, 224, 224]):
     model(dummy)
     for handle in handlers:
         handle.remove()
+    print(layer_fuse_pairs)
     return layer_fuse_pairs
 
 
-def register_bn_params_to_prev_layers(model, layer_bn_pairs):
+def register_fuse_params_to_prev_layers(model, layer_bn_pairs):
     idx = 0
     while idx + 1 < len(layer_bn_pairs):
         conv, bn = layer_bn_pairs[idx], layer_bn_pairs[idx + 1]
