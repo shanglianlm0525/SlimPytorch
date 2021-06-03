@@ -14,34 +14,44 @@ def get_input_sequences(model, dummy_shape=[1, 3, 224, 224]):
 
     def hook(name):
         def func(m, i, o):
-            if m in (nn.Conv2d, nn.Linear):
+            if isinstance(m, (nn.Conv2d, nn.Linear)):
                 if not layer_fuse_pairs:
                     layer_fuse_pairs.append((m, name))
                 else:
-                    if layer_fuse_pairs[-1][0] in (nn.Conv2d, nn.Linear):
+                    if isinstance(layer_fuse_pairs[-1][0], (nn.Conv2d, nn.Linear)):
                         layer_fuse_pairs.pop()
+                    else:
+                        if isinstance(layer_fuse_pairs[-1][0], nn.BatchNorm2d):
+                            layer_fuse_pairs.append((None, None))
+                        layer_fuse_pairs.append((m, name))
+            elif isinstance(m, (nn.BatchNorm2d)):
+                if isinstance(layer_fuse_pairs[-1][0], (nn.Conv2d, nn.Linear)):
+                    layer_fuse_pairs.append((m, name))
+            elif isinstance(m, (nn.ReLU, nn.ReLU6)):
+                if isinstance(layer_fuse_pairs[-1][0], nn.BatchNorm2d):
+                    layer_fuse_pairs.append((nn.ReLU(inplace=True), name))
             else:
-                layer_fuse_pairs.append((m, name))
-
+                raise ValueError("Unsupported optimizer type: {}".format(m))
         return func
 
+    pre = None
     handlers = []
     for name, module in model.named_modules():
-        if hasattr(module, 'weight'):
+        if hasattr(module, 'weight') or isinstance(module, (nn.ReLU, nn.ReLU6)):
             handlers.append(module.register_forward_hook(hook(name)))
     dummy = torch.randn(dummy_shape).cuda()
     model(dummy)
     for handle in handlers:
         handle.remove()
-    print(layer_fuse_pairs)
     return layer_fuse_pairs
 
 
 def register_fuse_params_to_prev_layers(model, layer_bn_pairs):
     idx = 0
-    while idx + 1 < len(layer_bn_pairs):
-        conv, bn = layer_bn_pairs[idx], layer_bn_pairs[idx + 1]
+    while idx + 2 < len(layer_bn_pairs):
+        conv, bn, act = layer_bn_pairs[idx], layer_bn_pairs[idx + 1], layer_bn_pairs[idx + 2]
         conv, conv_name = conv
+        # bn
         bn, bn_name = bn
         bn_state_dict = bn.state_dict()
         conv.register_buffer('eps', torch.tensor(bn.eps))
@@ -49,7 +59,10 @@ def register_fuse_params_to_prev_layers(model, layer_bn_pairs):
         conv.register_buffer('beta', bn_state_dict['bias'].detach())
         conv.register_buffer('mu', bn_state_dict['running_mean'].detach())
         conv.register_buffer('var', bn_state_dict['running_var'].detach())
-        idx += 2
+        # act function
+        act, act_name = act
+        conv.act = act
+        idx += 3
 
 
 def replace_quant_ops(model, w_bit, w_scheme, b_bit, a_bit, a_scheme):
