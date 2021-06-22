@@ -1,2 +1,2 @@
-# MCF
-MCF(Model Compression Framework) is a PyTorch-based framework for neural network compression framework.
+# CompressionPytorch
+CompressionPytorch is a PyTorch-based framework for neural network compression framework.
