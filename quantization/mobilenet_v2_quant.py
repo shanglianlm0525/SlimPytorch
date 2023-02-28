@@ -35,6 +35,7 @@ def replace_quant_ops(model, w_bit, w_scheme, b_bit, a_bit, a_scheme):
             replace_quant_ops(child, w_bit, w_scheme, b_bit, a_bit, a_scheme)
 
 
+
 class MobilenetV2_PTQ():
     def __init__(self):
         self.data_dir = '/home/lmin/data/hymenoptera/val'
