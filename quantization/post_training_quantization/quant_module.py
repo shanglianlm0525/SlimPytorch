@@ -6,24 +6,25 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 
 
 class Quantizer(nn.Module):
-    def __init__(self, n, quant_mode='mse', is_quantize=False, act_q=True,
+    def __init__(self, quant_mode='mse', bit=8, b_bit=None,  is_quantize=False,
                  is_calibration = False, is_symmetric = False, per_channel=False,
                  calibration_data=None):
         super(Quantizer, self).__init__()
         self.is_quantize = is_quantize
         self.quant_mode = quant_mode
-        self.n = n
+        self.bit = bit
+        self.b_bit = bit if b_bit is None else b_bit
 
         # weight and activation quantizer config
         # Weight Quantization : per-channel asymmetric quantization
         # Activation Quantization : per-layer asymmetric quantization
         self.is_symmetric = is_symmetric
         self.per_channel = per_channel
-        # self.act_q = act_q
         self.is_calibration = is_calibration
         self.calibration_data = calibration_data
 
@@ -85,7 +86,7 @@ class Quantizer(nn.Module):
             if not self.init or self.act_q:
                 self.init = True
                 for i in range(80):
-                    scale = (max_range - (0.01 * i)) / float(2 ** self.n - 1)
+                    scale = (max_range - (0.01 * i)) / float(2 ** self.bit - 1)
                     offset = torch.round(-self.min / scale)
                     x_fp_q = self.quant_dequant(x_f, scale, offset)
                     curr_mse = torch.pow(x_fp_q - x_f, 2).mean().cpu().numpy()
@@ -96,11 +97,11 @@ class Quantizer(nn.Module):
 
         elif self.quant_mode == 'minmax':
             if self.per_channel:
-                self.scale = max_range / float(2 ** self.n - 1)
+                self.scale = max_range / float(2 ** self.bit - 1)
                 if not self.is_symmetric:
                     self.offset = torch.round(-x_min / self.scale)
             else:
-                self.scale = max_range / float(2 ** self.n - 1)
+                self.scale = max_range / float(2 ** self.bit - 1)
                 if not self.is_symmetric:
                     self.offset = torch.round(-x_min / self.scale)
 
@@ -144,9 +145,9 @@ class Quantizer(nn.Module):
                 x_int += offset
 
             if self.is_symmetric:
-                l_bound, u_bound = -2 ** (self.n - 1), 2 ** (self.n - 1) - 1
+                l_bound, u_bound = -2 ** (self.bit - 1), 2 ** (self.bit - 1) - 1
             else:
-                l_bound, u_bound = 0, 2 ** (self.n) - 1
+                l_bound, u_bound = 0, 2 ** (self.bit) - 1
             x_q = torch.clamp(x_int, min=l_bound, max=u_bound)
             '''
                De-quantizing
@@ -160,9 +161,9 @@ class Quantizer(nn.Module):
                 x_int += offset
 
             if self.is_symmetric:
-                l_bound, u_bound = -2 ** (self.n - 1), 2 ** (self.n - 1) - 1
+                l_bound, u_bound = -2 ** (self.bit - 1), 2 ** (self.bit - 1) - 1
             else:
-                l_bound, u_bound = 0, 2 ** (self.n) - 1
+                l_bound, u_bound = 0, 2 ** (self.bit) - 1
             x_q = torch.clamp(x_int, min=l_bound, max=u_bound)
 
             '''
@@ -174,6 +175,73 @@ class Quantizer(nn.Module):
         return x_float_q
 
     def forward(self, x_f):
-        if (self.calibration and self.act_q) or not self.init:
+        if (self.calibration and self.calibration_data) or not self.init:
             self.init_params(x_f)
         return self.quant_dequant(x_f, self.scale, self.offset) if self.is_quantize else x_f
+
+
+class QConv2d(nn.Module):
+    '''
+    Fuses only the following sequence of modules:
+    conv, bn
+    conv, bn, relu
+    conv, relu
+    bn, relu
+    '''
+    def __init__(self, module, w_scheme='mse', w_bit = 8, b_bit=8, a_scheme='mse', a_bit=8):
+        super(QConv2d, self).__init__()
+        # weights
+        self.conv = module
+        self.weight_quantizer = Quantizer(w_scheme, w_bit, b_bit)
+        self.kwarg = {'stride': self.conv.stride, 'padding': self.conv.padding,
+                      'dilation': self.conv.dilation, 'groups': self.conv.groups, 'bias': self.conv.bias}
+
+        self.act = None
+        # activations
+        self.act_quantizer = Quantizer(a_scheme, a_bit, None)
+        self.pre_act = False
+
+    def fuse_bn(self):
+        '''
+                https://towardsdatascience.com/speed-up-inference-with-batch-normalization-folding-8a45a83a89d8
+
+                W_fold = gamma * W / sqrt(var + eps)
+                b_fold = (gamma * ( bias - mu ) / sqrt(var + eps)) + beta
+                '''
+        if hasattr(self.conv, 'gamma'):
+            gamma = getattr(self.conv, 'gamma')
+            beta = getattr(self.conv, 'beta')
+            mu = getattr(self.conv, 'mu')
+            var = getattr(self.conv, 'var')
+            eps = getattr(self.conv, 'eps')
+
+            denom = gamma.div(torch.sqrt(var + eps))
+
+            if getattr(self.conv, 'bias') == None:
+                self.conv.bias = torch.nn.Parameter(var.new_zeros(var.shape))
+            b_fold = denom * (self.conv.bias.data - mu) + beta
+            self.conv.bias.data.copy_(b_fold)
+
+            denom = denom.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+            self.conv.weight.data.mul_(denom)
+
+    def get_params(self):
+        w = self.conv.weight.detach()
+        if self.conv.bias != None:
+            b = self.conv.bias.detach()
+        else:
+            b = None
+        w = self.weight_quantizer(w)
+        return w, b
+
+    def turn_preactivation_on(self):
+        self.pre_act = True
+
+
+    def forward(self, x):
+        w, b = self.get_params()
+        out = F.conv2d(input=x, weight=w, bias=b, **self.kwarg)
+        if self.act and not self.pre_act:
+            out = self.act(out)
+        out = self.act_quantizer(out)
+        return out
