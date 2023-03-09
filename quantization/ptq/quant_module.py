@@ -245,3 +245,61 @@ class QConv2d(nn.Module):
             out = self.act(out)
         out = self.act_quantizer(out)
         return out
+
+
+class QLinear(nn.Module):
+    '''
+    Fuses only the following sequence of modules:
+    linear, relu
+    bn, relu
+    '''
+    def __init__(self, module, w_scheme='mse', w_bit = 8, b_bit=8, a_scheme='mse', a_bit=8):
+        super(QLinear, self).__init__()
+        self.fc = module
+        # self.fc, self.norm, self.act = module
+        self.weight_quantizer = Quantizer(w_scheme, w_bit, b_bit)
+        self.act = None
+        # activations
+        self.act_quantizer = Quantizer(a_scheme, a_bit, None)
+
+    def get_params(self):
+        w = self.fc.weight.detach()
+        if self.fc.bias != None:
+            b = self.fc.bias.detach()
+        else:
+            b = None
+        w = self.weight_quantizer(w)
+        return w, b
+
+    def forward(self, x):
+        w, b = self.get_params()
+        out = F.linear(x, w, b)
+        if self.act:
+            out = self.act(out)
+        out = self.act_quantizer(out)
+        return out
+
+
+class QIdentity(nn.Module):
+    def __init__(self):
+        super(QIdentity, self).__init__()
+
+    def forward(self, x):
+        return x
+
+
+class QConcat(nn.Module):
+    def __init__(self, dim):
+        super(QConcat, self).__init__()
+        self.dim = dim
+
+    def forward(self, x, y):
+        return torch.cat((x,y),self.dim)
+
+
+class QAdd(nn.Module):
+    def __init__(self):
+        super(QAdd, self).__init__()
+
+    def forward(self, x, y):
+        return x + y
