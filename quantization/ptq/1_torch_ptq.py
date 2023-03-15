@@ -7,9 +7,11 @@ import copy
 import os
 import torch
 import torch.nn as nn
+from torch.ao.quantization import QConfig
 from torch.ao.quantization.fx.graph_module import ObservedGraphModule
 from torch.quantization import get_default_qconfig
 from torch.quantization.quantize_fx import prepare_fx, convert_fx
+from torch.ao.quantization.observer import PerChannelMinMaxObserver, HistogramObserver
 
 from SlimPytorch.quantization.ptq.utils import prepare_data, prepare_model, train_model, eval_model
 
@@ -25,10 +27,10 @@ def quant_fx(model, eval_loader, device, save_dir="model_quant.pth"):
     prepared_model = prepare_fx(model_to_quantize, qconfig_dict)
     # print("prepared model: ", prepared_model)
 
-    assert isinstance(prepared_model, ObservedGraphModule), "model must be a perpared fx ObservedGraphModule."
     prepared_model.eval()
     with torch.inference_mode():
         for inputs, labels in eval_loader:
+            inputs = inputs.to(device)
             prepared_model(inputs)
 
     quantized_model = convert_fx(prepared_model)
