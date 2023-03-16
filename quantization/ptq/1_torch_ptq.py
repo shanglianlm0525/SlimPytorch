@@ -5,6 +5,7 @@
 # @File : 1_torch_ptq.py
 import copy
 import os
+import time
 import torch
 import torch.nn as nn
 from torch.ao.quantization import QConfig
@@ -56,9 +57,14 @@ if __name__ == "__main__":
         # save
         torch.save(model.state_dict(), weight_path)
 
+    device = torch.device("cpu")
+    since = time.time()
     acc = eval_model(model, eval_loader, device)
-    print('float model Acc: {:.4f}'.format(acc))
+    time_elapsed = time.time() - since
+    print('float model Acc: {:.4f}, eval complete in  {:.0f}s'.format(acc, time_elapsed))
     quantized_model = quant_fx(model, eval_loader, device)
 
-    acc = eval_model(quantized_model, eval_loader, torch.device("cpu"))
-    print('quant model Acc: {:.4f}'.format(acc))
+    since = time.time()
+    acc = eval_model(quantized_model, eval_loader, device)
+    time_elapsed = time.time() - since
+    print('quant model Acc: {:.4f}, eval complete in {:.0f}s'.format(acc, time_elapsed))
