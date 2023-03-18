@@ -12,8 +12,9 @@ import torch
 import torch.nn as nn
 
 from SlimPytorch.quantization.ptq.quant_util import get_input_sequences, register_fuse_params_to_prev_layers, \
-    replace_quant_ops, fuse_bn, fuse_model, set_quant_mode
+    replace_quant_ops, fuse_bn, fuse_model, set_quant_mode, PTQ
 from SlimPytorch.quantization.ptq.utils import prepare_data, prepare_model, train_model, eval_model
+
 
 
 def quant_proc(model, eval_loader, device, save_dir="model_quant.pth"):
@@ -21,9 +22,9 @@ def quant_proc(model, eval_loader, device, save_dir="model_quant.pth"):
     model.eval()
     model_to_quantize = copy.deepcopy(model)
 
-    # w_scheme, w_bit, b_bit, a_scheme, a_bit = 'minmax', 8, 8, 'kl_divergence', 8
+    # w_scheme, w_bit, b_bit, a_scheme, a_bit = 'minmax', 8, 8, 'minmax', 8
     w_scheme, w_bit, b_bit, a_scheme, a_bit = 'minmax', 8, 8, 'kl_divergence', 8
-    fuse_model(model_to_quantize, w_scheme, w_bit, b_bit, a_scheme, a_bit)
+    fuse_model(model_to_quantize, w_scheme, w_bit, b_bit, a_scheme, a_bit, eval_loader)
 
     model_to_quantize.apply(set_quant_mode(quantized=True))
 
@@ -57,7 +58,14 @@ if __name__ == "__main__":
     time_elapsed = time.time() - since
     print('float model Acc: {:.4f}, eval complete in  {:.0f}s'.format(acc, time_elapsed))
 
-    quantized_model = quant_proc(model, eval_loader, device)
+    # quantized_model = quant_proc(model, eval_loader, device)
+    ptq = PTQ(model, device, eval_loader)
+    ptq.fuse()
+
+    since = time.time()
+    acc = eval_model(ptq.model, eval_loader, device)
+    time_elapsed = time.time() - since
+    print('fuse model Acc: {:.4f}, eval complete in  {:.0f}s'.format(acc, time_elapsed))
 
     since = time.time()
     acc = eval_model(quantized_model, eval_loader, device)
