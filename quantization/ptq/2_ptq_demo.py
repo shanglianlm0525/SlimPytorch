@@ -11,19 +11,19 @@ import time
 import torch
 import torch.nn as nn
 
-from SlimPytorch.quantization.ptq.quant_util import get_input_sequences, register_fuse_params_to_prev_layers, \
-    replace_quant_ops, fuse_bn, fuse_model, set_quant_mode, PTQ
+from SlimPytorch.quantization.ptq.quant_util import fuse_model, set_quant_mode, PTQ, get_input_sequences, \
+    register_fuse_params_to_prev_layers, replace_quant_ops
 from SlimPytorch.quantization.ptq.utils import prepare_data, prepare_model, train_model, eval_model
 
 
 
-def quant_proc(model, eval_loader, device, save_dir="model_quant.pth"):
+def quant_proc(model, eval_loader, device, save_dir="mobilenet_v2_quant.pth"):
     model.to(device)
     model.eval()
     model_to_quantize = copy.deepcopy(model)
 
-    # w_scheme, w_bit, b_bit, a_scheme, a_bit = 'minmax', 8, 8, 'minmax', 8
-    w_scheme, w_bit, b_bit, a_scheme, a_bit = 'minmax', 8, 8, 'kl_divergence', 8
+    w_scheme, w_bit, b_bit, a_scheme, a_bit = 'minmax', 8, 8, 'minmax', 8
+    # w_scheme, w_bit, b_bit, a_scheme, a_bit = 'minmax', 8, 8, 'kl_divergence', 8
     fuse_model(model_to_quantize, w_scheme, w_bit, b_bit, a_scheme, a_bit, eval_loader)
 
     model_to_quantize.apply(set_quant_mode(quantized=True))
@@ -39,11 +39,13 @@ def quant_proc(model, eval_loader, device, save_dir="model_quant.pth"):
 
 if __name__ == "__main__":
     data_dir = '/home/lmin/data/hymenoptera'
+    model_type = 'mobilenet_v2'
     train_loader, eval_loader = prepare_data(data_dir=data_dir)
-    model = prepare_model()
+    model = prepare_model(model_type)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    weight_path = "model_weight.pth"
+
+    weight_path = model_type + "_weight.pth"
     if os.path.exists(weight_path):
         # load
         model.load_state_dict(torch.load(weight_path, map_location="cpu"))
@@ -58,12 +60,20 @@ if __name__ == "__main__":
     time_elapsed = time.time() - since
     print('float model Acc: {:.4f}, eval complete in  {:.0f}s'.format(acc, time_elapsed))
 
-    # quantized_model = quant_proc(model, eval_loader, device)
-    ptq = PTQ(model, device, eval_loader)
-    ptq.fuse()
+    w_scheme, w_bit, b_bit, a_scheme, a_bit = 'minmax', 8, 8, 'minmax', 8
+    model2 = fuse_model(model, w_scheme, w_bit, b_bit, a_scheme, a_bit, None)
 
     since = time.time()
-    acc = eval_model(ptq.model, eval_loader, device)
+    acc = eval_model(model2, eval_loader, device)
+    time_elapsed = time.time() - since
+    print('fuse model 2 Acc: {:.4f}, eval complete in  {:.0f}s'.format(acc, time_elapsed))
+
+    # quantized_model = quant_proc(model, eval_loader, device)
+    ptq = PTQ(model, device, eval_loader)
+    model1 =  ptq.fuse()
+
+    since = time.time()
+    acc = eval_model(model1, eval_loader, device)
     time_elapsed = time.time() - since
     print('fuse model Acc: {:.4f}, eval complete in  {:.0f}s'.format(acc, time_elapsed))
 
