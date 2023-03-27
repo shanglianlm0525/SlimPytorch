@@ -22,8 +22,8 @@ def quant_proc(model, eval_loader, device, save_dir="mobilenet_v2_quant.pth"):
     model.eval()
     model_to_quantize = copy.deepcopy(model)
 
-    w_scheme, w_bit, b_bit, a_scheme, a_bit = 'minmax', 8, 8, 'minmax', 8
-    # w_scheme, w_bit, b_bit, a_scheme, a_bit = 'minmax', 8, 8, 'kl_divergence', 8
+    # w_scheme, w_bit, b_bit, a_scheme, a_bit = 'minmax', 8, 8, 'minmax', 8
+    w_scheme, w_bit, b_bit, a_scheme, a_bit = 'minmax', 8, 8, 'kl', 8
     fuse_model(model_to_quantize, w_scheme, w_bit, b_bit, a_scheme, a_bit, eval_loader)
 
     model_to_quantize.apply(set_quant_mode(quantized=True))
@@ -44,7 +44,10 @@ if __name__ == "__main__":
     model = prepare_model(model_type)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-
+    """
+    float model Acc: 0.7451, eval complete in  4s
+    fuse model 2 Acc: 0.7386, eval complete in  4s
+    """
     weight_path = model_type + "_weight.pth"
     if os.path.exists(weight_path):
         # load
@@ -60,24 +63,20 @@ if __name__ == "__main__":
     time_elapsed = time.time() - since
     print('float model Acc: {:.4f}, eval complete in  {:.0f}s'.format(acc, time_elapsed))
 
-    w_scheme, w_bit, b_bit, a_scheme, a_bit = 'minmax', 8, 8, 'minmax', 8
-    model2 = fuse_model(model, w_scheme, w_bit, b_bit, a_scheme, a_bit, None)
-
-    since = time.time()
-    acc = eval_model(model2, eval_loader, device)
-    time_elapsed = time.time() - since
-    print('fuse model 2 Acc: {:.4f}, eval complete in  {:.0f}s'.format(acc, time_elapsed))
-
     # quantized_model = quant_proc(model, eval_loader, device)
     ptq = PTQ(model, device, eval_loader)
-    model1 =  ptq.fuse()
+    fuse_model =  ptq.fuse()
 
     since = time.time()
-    acc = eval_model(model1, eval_loader, device)
+    acc = eval_model(ptq.model, eval_loader, device)
     time_elapsed = time.time() - since
     print('fuse model Acc: {:.4f}, eval complete in  {:.0f}s'.format(acc, time_elapsed))
+
+    quantized_model = ptq.quantize()
 
     since = time.time()
     acc = eval_model(quantized_model, eval_loader, device)
     time_elapsed = time.time() - since
     print('quant model Acc: {:.4f}, eval complete in {:.0f}s'.format(acc, time_elapsed))
+
+
