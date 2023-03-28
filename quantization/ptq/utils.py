@@ -17,10 +17,13 @@ from torch.optim import lr_scheduler
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from torchvision.models.resnet import resnet18, resnet34, resnet50, resnet101, resnet152
+from torchvision.models.mobilenetv2 import mobilenet_v2
 
-
-def prepare_model(model_type='resnet18', pretrained=True, num_classes=2):
-    if model_type=='resnet50':
+def prepare_model(model_type='mobilenet_v2', pretrained=True, num_classes=2):
+    if model_type == 'mobilenet_v2':
+        model = mobilenet_v2(pretrained=pretrained)
+        model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
+    elif model_type=='resnet50':
         model = resnet50(pretrained=pretrained)
         model.fc = nn.Linear(model.fc.in_features, num_classes)
     elif model_type=='resnet34':
@@ -35,6 +38,7 @@ def prepare_model(model_type='resnet18', pretrained=True, num_classes=2):
     else:
         model = resnet18(pretrained=pretrained)
         model.fc = nn.Linear(model.fc.in_features, num_classes)
+        print(model)
 
     return model
 

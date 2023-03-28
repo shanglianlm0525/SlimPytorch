@@ -9,13 +9,15 @@ import torch
 import torch.nn as nn
 
 from SlimPytorch.quantization.ptq.quant_module import QConv2d, QIdentity, QLinear, Quantizer
+from SlimPytorch.quantization.ptq.utils import eval_model
 
 
 class PTQ():
     def __init__(self, model, device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'), calibration_data=None):
-        self.data_dir = '/home/lmin/data/hymenoptera/val'
-        self.model_dir = 'ckpt/mobilenet_v2_train.pt'
         self.device = device # torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model = copy.deepcopy(model)
+        self.model.to(self.device)
+        self.model.eval()
 
         # weight quantization parameters
         self.w_scheme = 'minmax' # org: 0.9216, 'mse': 0.9085 --> 0.9150 'minmax': 0.9020 --> 0.9085 'kl':
@@ -26,16 +28,13 @@ class PTQ():
         self.weight_per_channel = True
 
         # activation quantization parameters
-        self.a_scheme = 'minmax'
+        self.a_scheme = 'kl' # 'minmax'
         self.a_bit = 8
         self.act_quantize = False
         self.act_is_symmetric = True
         self.act_per_channel = False
         self.calibration_data = calibration_data
 
-        self.model = copy.deepcopy(model)
-        self.model.to(self.device)
-        self.model.eval()
 
     def set_quantize(self, flag):
         self.weight_quantize = flag
@@ -136,7 +135,59 @@ class PTQ():
 
 
     def quantize(self):
-        pass
+        # quantize weight
+        def quantize_weight(module):
+            if isinstance(module, Quantizer):
+                module.set_quantize(True)
+            if isinstance(module, (QConv2d, QLinear)):
+                module.quantize_weight()
+
+        self.model.apply(quantize_weight)
+
+        # quantize activation
+        if self.a_scheme == 'kl':
+            assert self.calibration_data is not None
+
+            def quantize_act_prepare(module):
+                if isinstance(module, (QConv2d, QLinear)):
+                    module.quantize_act_prepare()
+            def quantize_act_run(module):
+                if isinstance(module, (QConv2d, QLinear)):
+                    module.quantize_act_run()
+
+            self.model.apply(quantize_act_prepare)
+
+            eval_model(self.model, self.calibration_data, torch.device("cpu"))
+
+            self.model.apply(quantize_act_run)
+        else:
+            raise NotImplementedError(self.a_scheme + ' is not Implemented! ')
+        '''
+        # quantize activation
+        if self.a_scheme == 'kl':
+            assert self.calibration_data is not None
+            def quantize_act_kl_countMax(module):
+                if isinstance(module, (QConv2d, QLinear)):
+                    module.quantize_act_kl_countMax()
+            def quantize_act_kl_buildHistogram(module):
+                if isinstance(module, (QConv2d, QLinear)):
+                    module.quantize_act_kl_buildHistogram()
+            def quantize_act_kl_findBestThreshold(module):
+                if isinstance(module, (QConv2d, QLinear)):
+                    module.quantize_act_kl_findBestThreshold()
+            # 1 count the absmax
+            self.model.apply(quantize_act_kl_countMax)
+            # 2 build histogram
+            self.model.apply(quantize_act_kl_buildHistogram)
+            # 3 using kld to find the best threshold value
+            self.model.apply(quantize_act_kl_findBestThreshold)
+
+        else:
+            raise NotImplementedError(self.a_scheme + ' is not Implemented! ')
+        '''
+
+        return self.model
+
 
 
 

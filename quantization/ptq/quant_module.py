@@ -1,45 +1,47 @@
 # !/usr/bin/env python
 # -- coding: utf-8 --
-# @Time : 2023/3/2 16:30
+# @Time : 2023/3/19 18:11
 # @Author : liumin
 # @File : quant_module.py
-
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-
 class Quantizer(nn.Module):
-    def __init__(self, quant_mode='mse', bit=8, b_bit=None,  is_quantize=False,
-                 is_calibration = False, is_symmetric = False, per_channel=False,
-                 calibration_data=None):
+    def __init__(self, scheme='mse', bit=8, b_bit=None,  is_quantize=False,
+                 is_symmetric = False, per_channel=False, is_calibration=False, calibration_data=None):
         super(Quantizer, self).__init__()
-        self.is_quantize = is_quantize
-        self.quant_mode = quant_mode
+        self.scheme = scheme
         self.bit = bit
-        self.b_bit = bit if b_bit is None else b_bit
+        self.b_bit = b_bit
 
         # weight and activation quantizer config
         # Weight Quantization : per-channel asymmetric quantization
         # Activation Quantization : per-layer asymmetric quantization
+        self.is_quantize = is_quantize
         self.is_symmetric = is_symmetric
         self.per_channel = per_channel
         self.is_calibration = is_calibration
         self.calibration_data = calibration_data
 
         # quantizer parameters
-        self.min = torch.Tensor([float('inf')])[0].cuda()
-        self.max = torch.Tensor([float('-inf')])[0].cuda()
+        self.init = False
+        self.min = torch.Tensor([float('inf')])[0]
+        self.max = torch.Tensor([float('-inf')])[0]
         self.scale = None
         self.offset = None
+
+        # mse
         self.min_mse = float('inf')
+        # kl
+        self.num_histogram_bins = 2048
+        # self.histogram = torch.zeros(self.num_histogram_bins)
+
 
     def set_quantize(self, flag):
         self.is_quantize = flag
-
-    def estimate_range(self, flag):
-        self.is_calibration = flag
 
     def set_symmetric(self, flag):
         self.is_symmetric = flag
@@ -47,18 +49,21 @@ class Quantizer(nn.Module):
     def set_per_channel(self, flag):
         self.per_channel = flag
 
-    def init_params(self, x_f):
-        '''
-        https://heartbeat.fritz.ai/quantization-arithmetic-421e66afd842
+    def set_is_calibration(self, flag):
+        self.is_calibration = flag
 
-        There exist two modes
-        1) Symmetric:
-            Symmetric quantization uses absolute max value as its min/max meaning symmetric with respect to zero
-        2) Asymmetric
-            Asymmetric Quantization uses actual min/max, meaning it is asymmetric with respect to zero
-
-        Scale factor uses full range [-2**n / 2, 2**n - 1]
+    def get_data_range(self, x_f, device=None):
         '''
+         https://heartbeat.fritz.ai/quantization-arithmetic-421e66afd842
+
+         There exist two modes
+         1) Symmetric:
+             Symmetric quantization uses absolute max value as its min/max meaning symmetric with respect to zero
+         2) Asymmetric
+             Asymmetric Quantization uses actual min/max, meaning it is asymmetric with respect to zero
+
+         Scale factor uses full range [-2**n / 2, 2**n - 1]
+         '''
 
         if self.is_symmetric:
             if self.per_channel:
@@ -73,20 +78,19 @@ class Quantizer(nn.Module):
             else:
                 x_min, x_max = torch.min(x_f), torch.max(x_f)
 
-        if self.per_channel:
-            self.min = torch.min(x_min, self.min)
-            self.max = torch.max(x_max, self.max)
-            max_range = self.max - self.min
-        else:
-            self.min = torch.min(x_min, self.min)
-            self.max = torch.max(x_max, self.max)
-            max_range = self.max - self.min
+        self.min = torch.min(x_min, self.min)
+        self.max = torch.max(x_max, self.max)
+        data_range = self.max - self.min
+        return data_range
 
-        if self.quant_mode == 'mse':
+    def quant_params(self, x_f):
+        data_range = self.get_data_range(x_f)
+
+        if self.scheme == 'mse':
             if not self.init or self.act_q:
                 self.init = True
                 for i in range(80):
-                    scale = (max_range - (0.01 * i)) / float(2 ** self.bit - 1)
+                    scale = (data_range - (0.01 * i)) / float(2 ** self.bit - 1)
                     offset = torch.round(-self.min / scale)
                     x_fp_q = self.quant_dequant(x_f, scale, offset)
                     curr_mse = torch.pow(x_fp_q - x_f, 2).mean().cpu().numpy()
@@ -95,27 +99,95 @@ class Quantizer(nn.Module):
                         self.scale = scale
                         self.offset = offset
 
-        elif self.quant_mode == 'minmax':
+        elif self.scheme == 'minmax':
             if self.per_channel:
-                self.scale = max_range / float(2 ** self.bit - 1)
+                self.scale = data_range / float(2 ** self.bit - 1)
                 if not self.is_symmetric:
-                    self.offset = torch.round(-x_min / self.scale)
+                    self.offset = torch.round(-self.min / self.scale)
             else:
-                self.scale = max_range / float(2 ** self.bit - 1)
+                self.scale = data_range / float(2 ** self.bit - 1)
                 if not self.is_symmetric:
-                    self.offset = torch.round(-x_min / self.scale)
+                    self.offset = torch.round(-self.min / self.scale)
 
-        elif self.quant_mode == 'kl_divergence':
-            pass
+        elif self.scheme == 'kl':
             # 1 count the absmax
+            # 2 build histogram
+            indexs = torch.abs(x_f) / self.max * self.num_histogram_bins
+            indexs[indexs > (self.num_histogram_bins - 1)] = self.num_histogram_bins - 1
+            distribution = torch.bincount(indexs.view(-1).int(), minlength=self.num_histogram_bins - 1)
+            distribution = distribution.float() / (distribution.sum() + 1e-12)
 
-            # 2 initialize histogram
+            # 3 using kld to find the best threshold value
+            min_kl_divergence = 66666
+            target_bin = 2 ** self.bit
+            threshold_sum = torch.sum(distribution[target_bin:])
+            for threshold in range(target_bin, self.num_histogram_bins):
+                clip_distribution = distribution[:threshold].clone().detach()
+                clip_distribution[-1] += threshold_sum
+                # The calculation will greatly reduce the computational load.
+                threshold_sum = threshold_sum - distribution[threshold]
 
-            # 3 build histogram
+                num_per_bin = float(threshold) / target_bin
 
-            # 4 using kld to find the best threshold value
+                quantize_distribution = [0. for _ in range(target_bin)]
+                expand_distribution = [1e-9 for _ in range(threshold)]
+
+                for i in range(target_bin):
+                    start = i * num_per_bin
+                    end = start + num_per_bin
+                    left_upper = int(math.ceil(start))
+                    if left_upper > start:
+                        left_scale = left_upper - start
+                        quantize_distribution[i] += left_scale * distribution[left_upper - 1]
+                    right_lower = int(math.floor(end))
+                    if right_lower < end:
+                        right_scale = end - right_lower
+                        quantize_distribution[i] += right_scale * distribution[right_lower]
+
+                    quantize_distribution[i] += torch.sum(distribution[left_upper:right_lower])
+
+                for i in range(0, target_bin):
+                    start = i * num_per_bin
+                    end = start + num_per_bin
+                    count = 1e-12
+
+                    left_upper = int(math.ceil(start))
+                    left_scale = 0.0
+                    if left_upper > start:
+                        left_scale = left_upper - start
+                        if distribution[left_upper - 1] != 0:
+                            count += left_scale
+
+                    right_lower = int(math.floor(end))
+                    right_scale = 0.0
+                    if right_lower < end:
+                        right_scale = end - right_lower
+                        if distribution[right_lower] != 0:
+                            count += right_scale
+
+                    for j in range(left_upper, right_lower):
+                        if distribution[j] != 0:
+                            count = count + 1
+                    expand_value = quantize_distribution[i] / count
+
+                    if left_upper > start:
+                        if distribution[left_upper - 1] != 0:
+                            expand_distribution[left_upper - 1] += expand_value * left_scale
+                    if right_lower < end:
+                        if distribution[right_lower] != 0:
+                            expand_distribution[right_lower] += expand_value * right_scale
+                    for j in range(left_upper, right_lower):
+                        if distribution[j] != 0:
+                            expand_distribution[j] += expand_value
+
+                kl_divergence = self.compute_kl_divergence(clip_distribution, expand_distribution)
+                if kl_divergence < min_kl_divergence:
+                    min_kl_divergence = kl_divergence
+                    target_threshold = threshold
+
         else:
             raise NotImplementedError(self.quant_mode + ' is not Implemented! ')
+
         self.init = True
 
     def compute_kl_divergence(self, dist_a, dist_b):
@@ -175,8 +247,8 @@ class Quantizer(nn.Module):
         return x_float_q
 
     def forward(self, x_f):
-        if (self.calibration and self.calibration_data) or not self.init:
-            self.init_params(x_f)
+        if self.is_quantize and not self.init:
+            self.quant_params(x_f)
         return self.quant_dequant(x_f, self.scale, self.offset) if self.is_quantize else x_f
 
 
@@ -188,18 +260,30 @@ class QConv2d(nn.Module):
     conv, relu
     bn, relu
     '''
-    def __init__(self, module, w_scheme='mse', w_bit = 8, b_bit=8, a_scheme='mse', a_bit=8):
+    def __init__(self, module, w_scheme='mse', w_bit = 8, b_bit=8, a_scheme='mse', a_bit=8, calibration_data=None):
         super(QConv2d, self).__init__()
         # weights
         self.conv = module
-        self.weight_quantizer = Quantizer(w_scheme, w_bit, b_bit)
+        self.weight_quantizer = Quantizer(w_scheme, w_bit, b_bit,
+                                          is_symmetric = False, per_channel=True)
         self.kwarg = {'stride': self.conv.stride, 'padding': self.conv.padding,
-                      'dilation': self.conv.dilation, 'groups': self.conv.groups, 'bias': self.conv.bias}
+                      'dilation': self.conv.dilation, 'groups': self.conv.groups}
 
-        self.act = None
+        self.act = self.conv.act
         # activations
-        self.act_quantizer = Quantizer(a_scheme, a_bit, None)
+        self.act_quantizer = Quantizer(a_scheme, a_bit, None,
+                                       is_symmetric=True, per_channel=False, calibration_data=calibration_data)
         self.pre_act = False
+
+        # parameter
+        self.weight_quantized = False
+        self.quantized_w = None
+        self.quantized_b = None
+        self.act_quantized = False
+        self.calibration_data = calibration_data
+        self.activations = []
+        self.activations = []
+
 
     def fuse_bn(self):
         '''
@@ -225,20 +309,55 @@ class QConv2d(nn.Module):
             denom = denom.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
             self.conv.weight.data.mul_(denom)
 
-    def get_params(self):
-        w = self.conv.weight.detach()
-        if self.conv.bias != None:
-            b = self.conv.bias.detach()
-        else:
-            b = None
-        w = self.weight_quantizer(w)
-        return w, b
 
-    def turn_preactivation_on(self):
+    def quantize_weight(self):
+        # quantize weight
+        self.quantized_w = self.conv.weight.detach()
+        if self.conv.bias != None:
+            self.quantized_b = self.conv.bias.detach()
+        else:
+            self.quantized_b = None
+        self.quantized_w = self.weight_quantizer(self.quantized_w)
+        self.weight_quantized = True
+
+    def quantize_act(self):
+        # quantize activation
+        # self.act_quantizer(out)
+        self.act_quantized = True
+
+    def quantize_act_prepare(self):
+        # quantize activation
+        # self.act_quantizer(out)
+        self.act_quantized = True
+
+    def quantize_act_run(self):
+        activations = torch.cat(self.activations)
+        self.act_quantizer(activations)
+
+    def quantize(self):
+        self.quantize_weight()
+
+    def forward(self, x):
+        if self.act_quantized:
+            self.activations.append(x)
+        if self.weight_quantized:
+            out = F.conv2d(input=x, weight=self.quantized_w, bias=self.quantized_b, **self.kwarg)
+            if self.act and not self.pre_act:
+                out = self.act(out)
+            return out
+
+        out = self.conv(x)
+        if self.act and not self.pre_act:
+            out = self.act(out)
+        return out
+
+
+
+    def set_pre_activation(self):
         self.pre_act = True
 
 
-    def forward(self, x):
+    def forward2(self, x):
         w, b = self.get_params()
         out = F.conv2d(input=x, weight=w, bias=b, **self.kwarg)
         if self.act and not self.pre_act:
@@ -253,14 +372,70 @@ class QLinear(nn.Module):
     linear, relu
     bn, relu
     '''
-    def __init__(self, module, w_scheme='mse', w_bit = 8, b_bit=8, a_scheme='mse', a_bit=8):
+    def __init__(self, module, w_scheme='mse', w_bit = 8, b_bit=8, a_scheme='mse', a_bit=8, calibration_data=None):
         super(QLinear, self).__init__()
         self.fc = module
         # self.fc, self.norm, self.act = module
-        self.weight_quantizer = Quantizer(w_scheme, w_bit, b_bit)
-        self.act = None
+        self.weight_quantizer = Quantizer(w_scheme, w_bit, None,
+                                          is_symmetric = False, per_channel=True)
+        self.act = self.fc.act if hasattr(self.fc, 'act') else None
         # activations
-        self.act_quantizer = Quantizer(a_scheme, a_bit, None)
+        self.act_quantizer = Quantizer(a_scheme, a_bit, None,
+                                       is_symmetric = True, per_channel=False, calibration_data=calibration_data)
+
+        # parameter
+        self.weight_quantized = False
+        self.quantized_w = None
+        self.quantized_b = None
+        self.act_quantized = False
+        self.calibration_data = calibration_data
+        self.activations = []
+        '''
+        if self.calibration_data is not None:
+            self.num_calibration_data = len(self.calibration_data)
+            self.activations = [None] * self.num_calibration_data
+        '''
+
+    def quantize_weight(self):
+        # quantize weight
+        self.quantized_w = self.fc.weight.detach()
+        if self.fc.bias != None:
+            self.quantized_b = self.fc.bias.detach()
+        else:
+            self.quantized_b = None
+        self.quantized_w = self.weight_quantizer(self.quantized_w)
+        print(self.weight_quantized)
+        self.weight_quantized = True
+
+    def quantize_act(self):
+        # quantize activation
+        # self.act_quantizer(out)
+        self.act_quantized = True
+
+    def quantize_act_prepare(self):
+        # quantize activation
+        # self.act_quantizer(out)
+        self.act_quantized = True
+
+    def quantize_act_run(self):
+        aa = self.activations
+
+    def quantize(self):
+        self.quantize_weight()
+
+    def forward(self, x):
+        if self.weight_quantized:
+            print(22222)
+            out = F.linear(x, self.quantized_w, self.quantized_b)
+            if self.act:
+                out = self.act(out)
+            # out = self.act_quantizer(out)
+            return out
+        print(11111)
+        out = self.fc(x)
+        if self.act and not self.pre_act:
+            out = self.act(out)
+        return out
 
     def get_params(self):
         w = self.fc.weight.detach()
@@ -271,7 +446,7 @@ class QLinear(nn.Module):
         w = self.weight_quantizer(w)
         return w, b
 
-    def forward(self, x):
+    def forward2(self, x):
         w, b = self.get_params()
         out = F.linear(x, w, b)
         if self.act:
@@ -286,20 +461,3 @@ class QIdentity(nn.Module):
 
     def forward(self, x):
         return x
-
-
-class QConcat(nn.Module):
-    def __init__(self, dim):
-        super(QConcat, self).__init__()
-        self.dim = dim
-
-    def forward(self, x, y):
-        return torch.cat((x,y),self.dim)
-
-
-class QAdd(nn.Module):
-    def __init__(self):
-        super(QAdd, self).__init__()
-
-    def forward(self, x, y):
-        return x + y
