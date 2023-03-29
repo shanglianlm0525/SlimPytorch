@@ -191,11 +191,8 @@ class Quantizer(nn.Module):
         self.init = True
 
     def compute_kl_divergence(self, dist_a, dist_b):
-        dist_a = np.array(dist_a)
-        dist_b = np.array(dist_b)
-        nonzero_inds = dist_a != 0
-        return np.sum(dist_a[nonzero_inds] *
-                      np.log(dist_a[nonzero_inds] / (dist_b[nonzero_inds] + 1e-12) + 1e-12))
+        nonzero_inds = torch.nonzero(dist_a)
+        return torch.sum(dist_a[nonzero_inds] * torch.log(dist_a[nonzero_inds] / (dist_b[nonzero_inds] + 1e-12) + 1e-12))
 
     def quant_dequant(self, x_f, scale, offset):
         '''
