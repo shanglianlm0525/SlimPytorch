@@ -11,7 +11,7 @@ import numpy as np
 
 class Quantizer(nn.Module):
     def __init__(self, scheme='mse', bit=8, b_bit=None,  is_quantize=False,
-                 is_symmetric = False, per_channel=False, is_calibration=False, calibration_data=None):
+                 is_symmetric = False, per_channel=False, is_calibration=False):
         super(Quantizer, self).__init__()
         self.scheme = scheme
         self.bit = bit
@@ -24,7 +24,6 @@ class Quantizer(nn.Module):
         self.is_symmetric = is_symmetric
         self.per_channel = per_channel
         self.is_calibration = is_calibration
-        self.calibration_data = calibration_data
 
         # quantizer parameters
         self.init = False
@@ -120,6 +119,7 @@ class Quantizer(nn.Module):
             # 3 using kld to find the best threshold value
             min_kl_divergence = 66666
             target_bin = 2 ** self.bit
+            target_threshold = distribution.shape[0] - 1
             threshold_sum = torch.sum(distribution[target_bin:])
             for threshold in range(target_bin, self.num_histogram_bins):
                 clip_distribution = distribution[:threshold].clone().detach()
@@ -185,13 +185,16 @@ class Quantizer(nn.Module):
                     min_kl_divergence = kl_divergence
                     target_threshold = threshold
 
+            self.scale = (float(2 ** self.bit - 1) * self.num_histogram_bins) / ((target_threshold + 0.5) * self.max)
+
         else:
             raise NotImplementedError(self.quant_mode + ' is not Implemented! ')
 
         self.init = True
 
     def compute_kl_divergence(self, dist_a, dist_b):
-        nonzero_inds = torch.nonzero(dist_a)
+        dist_b = torch.tensor(dist_b).to(dist_a.device)
+        nonzero_inds = dist_a != 0
         return torch.sum(dist_a[nonzero_inds] * torch.log(dist_a[nonzero_inds] / (dist_b[nonzero_inds] + 1e-12) + 1e-12))
 
     def quant_dequant(self, x_f, scale, offset):
@@ -257,7 +260,7 @@ class QConv2d(nn.Module):
     conv, relu
     bn, relu
     '''
-    def __init__(self, module, w_scheme='mse', w_bit = 8, b_bit=8, a_scheme='mse', a_bit=8, calibration_data=None):
+    def __init__(self, module, w_scheme='mse', w_bit = 8, b_bit=8, a_scheme='mse', a_bit=8):
         super(QConv2d, self).__init__()
         # weights
         self.conv = module
@@ -269,7 +272,7 @@ class QConv2d(nn.Module):
         self.act = self.conv.act
         # activations
         self.act_quantizer = Quantizer(a_scheme, a_bit, None,
-                                       is_symmetric=True, per_channel=False, calibration_data=calibration_data)
+                                       is_symmetric=True, per_channel=False)
         self.pre_act = False
 
         # parameter
@@ -277,8 +280,6 @@ class QConv2d(nn.Module):
         self.quantized_w = None
         self.quantized_b = None
         self.act_quantized = False
-        self.calibration_data = calibration_data
-        self.activations = []
         self.activations = []
 
 
@@ -329,6 +330,7 @@ class QConv2d(nn.Module):
 
     def quantize_act_run(self):
         activations = torch.cat(self.activations)
+        self.activations = []
         self.act_quantizer(activations)
 
     def quantize(self):
@@ -369,7 +371,7 @@ class QLinear(nn.Module):
     linear, relu
     bn, relu
     '''
-    def __init__(self, module, w_scheme='mse', w_bit = 8, b_bit=8, a_scheme='mse', a_bit=8, calibration_data=None):
+    def __init__(self, module, w_scheme='mse', w_bit = 8, b_bit=8, a_scheme='mse', a_bit=8):
         super(QLinear, self).__init__()
         self.fc = module
         # self.fc, self.norm, self.act = module
@@ -378,20 +380,15 @@ class QLinear(nn.Module):
         self.act = self.fc.act if hasattr(self.fc, 'act') else None
         # activations
         self.act_quantizer = Quantizer(a_scheme, a_bit, None,
-                                       is_symmetric = True, per_channel=False, calibration_data=calibration_data)
+                                       is_symmetric = True, per_channel=False)
 
         # parameter
         self.weight_quantized = False
         self.quantized_w = None
         self.quantized_b = None
         self.act_quantized = False
-        self.calibration_data = calibration_data
         self.activations = []
-        '''
-        if self.calibration_data is not None:
-            self.num_calibration_data = len(self.calibration_data)
-            self.activations = [None] * self.num_calibration_data
-        '''
+
 
     def quantize_weight(self):
         # quantize weight
@@ -401,55 +398,39 @@ class QLinear(nn.Module):
         else:
             self.quantized_b = None
         self.quantized_w = self.weight_quantizer(self.quantized_w)
-        print(self.weight_quantized)
         self.weight_quantized = True
 
     def quantize_act(self):
         # quantize activation
-        # self.act_quantizer(out)
         self.act_quantized = True
 
     def quantize_act_prepare(self):
         # quantize activation
-        # self.act_quantizer(out)
         self.act_quantized = True
 
     def quantize_act_run(self):
-        aa = self.activations
+        activations = torch.cat(self.activations)
+        self.activations = []
+        self.act_quantizer(activations)
 
     def quantize(self):
         self.quantize_weight()
 
+
     def forward(self, x):
+        if self.act_quantized:
+            self.activations.append(x)
         if self.weight_quantized:
-            print(22222)
             out = F.linear(x, self.quantized_w, self.quantized_b)
-            if self.act:
+            if self.act and not self.pre_act:
                 out = self.act(out)
-            # out = self.act_quantizer(out)
             return out
-        print(11111)
+
         out = self.fc(x)
         if self.act and not self.pre_act:
             out = self.act(out)
         return out
 
-    def get_params(self):
-        w = self.fc.weight.detach()
-        if self.fc.bias != None:
-            b = self.fc.bias.detach()
-        else:
-            b = None
-        w = self.weight_quantizer(w)
-        return w, b
-
-    def forward2(self, x):
-        w, b = self.get_params()
-        out = F.linear(x, w, b)
-        if self.act:
-            out = self.act(out)
-        out = self.act_quantizer(out)
-        return out
 
 
 class QIdentity(nn.Module):

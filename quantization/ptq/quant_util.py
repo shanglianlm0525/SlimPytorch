@@ -41,10 +41,10 @@ class PTQ():
         self.act_quantize = flag
 
     def fuse(self):
-        layer_fuse_pairs = get_input_sequences(self.model)
+        layer_fuse_pairs = get_input_sequences(self.model, device=self.device)
         register_fuse_params_to_prev_layers(self.model, layer_fuse_pairs)
         # print(layer_fuse_pairs)
-        replace_quant_ops(self.model, self.w_scheme, self.w_bit, self.b_bit, self.a_scheme, self.a_bit, self.calibration_data)
+        replace_quant_ops(self.model, self.w_scheme, self.w_bit, self.b_bit, self.a_scheme, self.a_bit)
 
         self.model.apply(fuse_bn)
         return self.model
@@ -157,41 +157,18 @@ class PTQ():
 
             self.model.apply(quantize_act_prepare)
 
-            eval_model(self.model, self.calibration_data, torch.device("cpu"))
+            eval_model(self.model, self.calibration_data, self.device)
 
             self.model.apply(quantize_act_run)
         else:
             raise NotImplementedError(self.a_scheme + ' is not Implemented! ')
-        '''
-        # quantize activation
-        if self.a_scheme == 'kl':
-            assert self.calibration_data is not None
-            def quantize_act_kl_countMax(module):
-                if isinstance(module, (QConv2d, QLinear)):
-                    module.quantize_act_kl_countMax()
-            def quantize_act_kl_buildHistogram(module):
-                if isinstance(module, (QConv2d, QLinear)):
-                    module.quantize_act_kl_buildHistogram()
-            def quantize_act_kl_findBestThreshold(module):
-                if isinstance(module, (QConv2d, QLinear)):
-                    module.quantize_act_kl_findBestThreshold()
-            # 1 count the absmax
-            self.model.apply(quantize_act_kl_countMax)
-            # 2 build histogram
-            self.model.apply(quantize_act_kl_buildHistogram)
-            # 3 using kld to find the best threshold value
-            self.model.apply(quantize_act_kl_findBestThreshold)
-
-        else:
-            raise NotImplementedError(self.a_scheme + ' is not Implemented! ')
-        '''
 
         return self.model
 
 
 
 
-def get_input_sequences(model, dummy_shape=[1, 3, 224, 224]):
+def get_input_sequences(model, dummy_shape=[1, 3, 224, 224], device=None):
     layer_fuse_pairs = []
 
     def hook(name):
@@ -221,8 +198,7 @@ def get_input_sequences(model, dummy_shape=[1, 3, 224, 224]):
     for name, module in model.named_modules():
         if hasattr(module, 'weight') or isinstance(module, (nn.ReLU, nn.ReLU6)):
             handlers.append(module.register_forward_hook(hook(name)))
-    # dummy = torch.randn(dummy_shape).cuda()
-    dummy = torch.randn(dummy_shape)
+    dummy = torch.randn(dummy_shape).to(device)
     model(dummy)
     for handle in handlers:
         handle.remove()
@@ -248,15 +224,15 @@ def register_fuse_params_to_prev_layers(model, layer_bn_pairs):
         idx += 3
 
 
-def replace_quant_ops(model, w_scheme, w_bit, b_bit, a_scheme, a_bit, calibration_data=None):
+def replace_quant_ops(model, w_scheme, w_bit, b_bit, a_scheme, a_bit):
     prev_module = None
     for child_name, child in model.named_children():
         if isinstance(child, nn.Conv2d):
-            new_op = QConv2d(child, w_scheme=w_scheme, w_bit = w_bit, b_bit=b_bit, a_scheme=a_scheme, a_bit=a_bit, calibration_data=calibration_data)
+            new_op = QConv2d(child, w_scheme=w_scheme, w_bit = w_bit, b_bit=b_bit, a_scheme=a_scheme, a_bit=a_bit)
             setattr(model, child_name, new_op)
             prev_module = getattr(model, child_name)
         elif isinstance(child, nn.Linear):
-            new_op = QLinear(child, w_scheme=w_scheme, w_bit = w_bit, b_bit=b_bit, a_scheme=a_scheme, a_bit=a_bit, calibration_data=calibration_data)
+            new_op = QLinear(child, w_scheme=w_scheme, w_bit = w_bit, b_bit=b_bit, a_scheme=a_scheme, a_bit=a_bit)
             setattr(model, child_name, new_op)
             prev_module = getattr(model, child_name)
         elif isinstance(child, (nn.ReLU, nn.ReLU6)):
@@ -266,23 +242,12 @@ def replace_quant_ops(model, w_scheme, w_bit, b_bit, a_scheme, a_bit, calibratio
         elif isinstance(child, nn.BatchNorm2d):
             setattr(model, child_name, QIdentity())
         else:
-            replace_quant_ops(child, w_scheme, w_bit, b_bit, a_scheme, a_bit, calibration_data=calibration_data)
+            replace_quant_ops(child, w_scheme, w_bit, b_bit, a_scheme, a_bit)
 
 
 def fuse_bn(module):
     if isinstance(module, (QConv2d)):
         module.fuse_bn()
-
-
-def fuse_model(model, w_scheme, w_bit, b_bit, a_scheme, a_bit, calibration_data):
-    layer_fuse_pairs = get_input_sequences(model)
-    register_fuse_params_to_prev_layers(model, layer_fuse_pairs)
-    # print(layer_fuse_pairs)
-
-    replace_quant_ops(model, w_scheme, w_bit, b_bit, a_scheme, a_bit, calibration_data)
-
-    model.apply(fuse_bn)
-    return model
 
 
 def set_quant_mode(quantized):

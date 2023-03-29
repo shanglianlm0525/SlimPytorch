@@ -11,8 +11,7 @@ import time
 import torch
 import torch.nn as nn
 
-from SlimPytorch.quantization.ptq.quant_util import fuse_model, set_quant_mode, PTQ, get_input_sequences, \
-    register_fuse_params_to_prev_layers, replace_quant_ops
+from SlimPytorch.quantization.ptq.quant_util import set_quant_mode, PTQ
 from SlimPytorch.quantization.ptq.utils import prepare_data, prepare_model, train_model, eval_model
 
 
@@ -41,6 +40,7 @@ if __name__ == "__main__":
     data_dir = '/home/lmin/data/hymenoptera'
     model_type = 'mobilenet_v2'
     train_loader, eval_loader = prepare_data(data_dir=data_dir)
+    calibration_loader = prepare_data(data_dir=data_dir, only_eval=True, calibration=True)
     model = prepare_model(model_type)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -57,7 +57,7 @@ if __name__ == "__main__":
         # save
         torch.save(model.state_dict(), weight_path)
 
-    device = torch.device("cpu")
+    # device = torch.device("cpu")
     since = time.time()
     acc = eval_model(model, eval_loader, device)
     time_elapsed = time.time() - since

@@ -43,7 +43,7 @@ def prepare_model(model_type='mobilenet_v2', pretrained=True, num_classes=2):
     return model
 
 
-def prepare_data(data_dir='/home/lmin/data/hymenoptera', img_size=(224, 224), train_batch_size=16, eval_batch_size=1, num_workers=8, only_eval=False):
+def prepare_data(data_dir='/home/lmin/data/hymenoptera', img_size=(224, 224), train_batch_size=16, eval_batch_size=1, num_workers=8, only_eval=False, calibration=False):
 
     eval_transform = transforms.Compose([
         transforms.Resize(256),
@@ -51,7 +51,10 @@ def prepare_data(data_dir='/home/lmin/data/hymenoptera', img_size=(224, 224), tr
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
-    eval_dataset = datasets.ImageFolder(os.path.join(data_dir, 'val'), eval_transform)
+    if calibration:
+        eval_dataset = datasets.ImageFolder(os.path.join(data_dir, 'calibration'), eval_transform)
+    else:
+        eval_dataset = datasets.ImageFolder(os.path.join(data_dir, 'val'), eval_transform)
     eval_loader = DataLoader(eval_dataset, batch_size=eval_batch_size, shuffle=False, num_workers=num_workers)
 
     if only_eval:
