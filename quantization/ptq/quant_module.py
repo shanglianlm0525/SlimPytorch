@@ -109,16 +109,18 @@ class Quantizer(nn.Module):
                     self.offset = torch.round(-self.min / self.scale)
 
         elif self.scheme == 'kl':
+            x_f = x_f.to(torch.device("cpu"))
+            self.max = self.max.to(torch.device("cpu"))
             # 1 count the absmax
             # 2 build histogram
             indexs = torch.abs(x_f) / self.max * self.num_histogram_bins
             indexs[indexs > (self.num_histogram_bins - 1)] = self.num_histogram_bins - 1
             distribution = torch.bincount(indexs.view(-1).int(), minlength=self.num_histogram_bins - 1)
-            distribution = distribution.float() / (distribution.sum() + 1e-12)
+            distribution = distribution.float() / (torch.sum(distribution) + 1e-12)
 
             # 3 using kld to find the best threshold value
             min_kl_divergence = 66666
-            target_bin = 2 ** self.bit
+            target_bin = 2 ** self.bit-1
             target_threshold = distribution.shape[0] - 1
             threshold_sum = torch.sum(distribution[target_bin:])
             for threshold in range(target_bin, self.num_histogram_bins):
@@ -185,8 +187,8 @@ class Quantizer(nn.Module):
                     min_kl_divergence = kl_divergence
                     target_threshold = threshold
 
-            self.scale = (float(2 ** self.bit - 1) * self.num_histogram_bins) / ((target_threshold + 0.5) * self.max)
-
+            self.scale = (float(2 ** (self.bit-1) - 1) * self.num_histogram_bins) / ((target_threshold + 0.5) * self.max)
+            print(self.scale)
         else:
             raise NotImplementedError(self.quant_mode + ' is not Implemented! ')
 

@@ -6,7 +6,7 @@
 
 import torch
 import torch.nn as nn
-from MCF.quantization.quant_modules import QConv2d, QLinear, QIdentity, Quantizers
+from SlimPytorch.quantization.quant_modules import QConv2d, QIdentity, QLinear, Quantizers
 
 
 def get_input_sequences(model, dummy_shape=[1, 3, 224, 224]):
@@ -102,5 +102,6 @@ def set_quant_mode(quantized):
     def set_precision_mode(module):
         if isinstance(module, Quantizers):
             module.set_quantize(quantized)
-            module.estimate_range(flag = False)
+            module.estimate_range(False)
     return set_precision_mode
+

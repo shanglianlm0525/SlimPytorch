@@ -2,23 +2,25 @@
 # -- coding: utf-8 --
 # @Time : 2021/5/26 17:55
 # @Author : liumin
-# @File : quant_modules.py
+# @File : quant_module_bak.py
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import numpy as np
 
 class Quantizers(nn.Module):
-    def __init__(self, bw, quant_mode='mse', act_q=True, quantize=False):
+    def __init__(self, n, quant_mode='mse', is_symmetric=False, act_q=True, per_channel=True, quantize=False):
         super(Quantizers, self).__init__()
         self.is_quantize = quantize
         self.act_q = act_q
         self.init = False
-        self.is_symmetric = False
+        self.is_symmetric = is_symmetric
+        # self.is_symmetric = False if quant_mode=='kl_divergence' else True
+        self.per_channel = per_channel
         self.quant_mode = quant_mode
         self.calibration = False
-        self.n = bw
+        self.n = n
         self.offset = None
         self.min = torch.Tensor([float('inf')])[0].cuda()
         self.max = torch.Tensor([float('-inf')])[0].cuda()
@@ -45,13 +47,26 @@ class Quantizers(nn.Module):
         '''
 
         if self.is_symmetric:
-            x_min, x_max = -torch.max(torch.abs(x_f)), torch.max(torch.abs(x_f))
+            if self.per_channel:
+                x_f_tmp = x_f.view(x_f.shape[0], -1)
+                x_min, x_max = -torch.max(torch.abs(x_f_tmp), 1)[0], torch.max(torch.abs(x_f_tmp), 1)[0]
+            else:
+                x_min, x_max = -torch.max(torch.abs(x_f)), torch.max(torch.abs(x_f))
         else:
-            x_min, x_max = torch.min(x_f), torch.max(x_f)
+            if self.per_channel:
+                x_f_tmp = x_f.view(x_f.shape[0], -1)
+                x_min, x_max = torch.min(x_f_tmp, 1)[0], torch.max(x_f_tmp, 1)[0]
+            else:
+                x_min, x_max = torch.min(x_f), torch.max(x_f)
 
-        self.min = torch.min(x_min, self.min)
-        self.max = torch.max(x_max, self.max)
-        max_range = self.max - self.min
+        if self.per_channel:
+            self.min = torch.min(x_min, self.min)
+            self.max = torch.max(x_max, self.max)
+            max_range = self.max - self.min
+        else:
+            self.min = torch.min(x_min, self.min)
+            self.max = torch.max(x_max, self.max)
+            max_range = self.max - self.min
 
         if self.quant_mode == 'mse':
             if not self.init or self.act_q:
@@ -67,10 +82,32 @@ class Quantizers(nn.Module):
                         self.offset = offset
 
         elif self.quant_mode == 'minmax':
-            self.scale = max_range / float(2 ** self.n - 1)
-            if not self.is_symmetric:
-                self.offset = torch.round(-x_min / self.scale)
+            if self.per_channel:
+                self.scale = max_range / float(2 ** self.n - 1)
+                if not self.is_symmetric:
+                    self.offset = torch.round(-x_min / self.scale)
+            else:
+                self.scale = max_range / float(2 ** self.n - 1)
+                if not self.is_symmetric:
+                    self.offset = torch.round(-x_min / self.scale)
+        elif self.quant_mode == 'kl':
+            pass
+            # 1 count the absmax
+
+            # 2 initialize histogram
+
+            # 3 build histogram
+
+            # 4 using kld to find the best threshold value
+
         self.init = True
+
+    def compute_kl_divergence(self, dist_a, dist_b):
+        dist_a = np.array(dist_a)
+        dist_b = np.array(dist_b)
+        nonzero_inds = dist_a != 0
+        return np.sum(dist_a[nonzero_inds] *
+                      np.log(dist_a[nonzero_inds] / (dist_b[nonzero_inds] + 1e-12) + 1e-12))
 
     def quant_dequant(self, x_f, scale, offset):
         '''
@@ -78,22 +115,47 @@ class Quantizers(nn.Module):
         Formula is derived from below:
         https://medium.com/ai-innovation/quantization-on-pytorch-59dea10851e1
         '''
-        x_int = torch.round(x_f / scale)
-        if not self.is_symmetric:
-            x_int += offset
+        if self.per_channel:
+            if x_f.ndim == 4:
+                scale = scale.view(x_f.shape[0], 1, 1, 1)
+                if not self.is_symmetric:
+                    offset = offset.view(x_f.shape[0], 1, 1, 1)
+            elif x_f.ndim == 2:
+                scale = scale.view(x_f.shape[0], 1)
+                if not self.is_symmetric:
+                    offset = offset.view(x_f.shape[0], 1)
+            x_int = torch.round(x_f / scale)
+            if not self.is_symmetric:
+                x_int += offset
 
-        if self.is_symmetric:
-            l_bound, u_bound = -2 ** (self.n - 1), 2 ** (self.n - 1) - 1
+            if self.is_symmetric:
+                l_bound, u_bound = -2 ** (self.n - 1), 2 ** (self.n - 1) - 1
+            else:
+                l_bound, u_bound = 0, 2 ** (self.n) - 1
+            x_q = torch.clamp(x_int, min=l_bound, max=u_bound)
+            '''
+               De-quantizing
+            '''
+            if not self.is_symmetric:
+                x_q -= offset
+            x_float_q = x_q * scale
         else:
-            l_bound, u_bound = 0, 2 ** (self.n) - 1
-        x_q = torch.clamp(x_int, min=l_bound, max=u_bound)
+            x_int = torch.round(x_f / scale)
+            if not self.is_symmetric:
+                x_int += offset
 
-        '''
-        De-quantizing
-        '''
-        if not self.is_symmetric:
-            x_q -= offset
-        x_float_q = x_q * scale
+            if self.is_symmetric:
+                l_bound, u_bound = -2 ** (self.n - 1), 2 ** (self.n - 1) - 1
+            else:
+                l_bound, u_bound = 0, 2 ** (self.n) - 1
+            x_q = torch.clamp(x_int, min=l_bound, max=u_bound)
+
+            '''
+            De-quantizing
+            '''
+            if not self.is_symmetric:
+                x_q -= offset
+            x_float_q = x_q * scale
         return x_float_q
 
     def forward(self, x_f):
