@@ -120,7 +120,7 @@ class Quantizer(nn.Module):
 
             # 3 using kld to find the best threshold value
             min_kl_divergence = 66666
-            target_bin = 2 ** self.bit-1
+            target_bin = 2 ** (self.bit-1)
             target_threshold = distribution.shape[0] - 1
             threshold_sum = torch.sum(distribution[target_bin:])
             for threshold in range(target_bin, self.num_histogram_bins):
@@ -187,8 +187,8 @@ class Quantizer(nn.Module):
                     min_kl_divergence = kl_divergence
                     target_threshold = threshold
 
-            self.scale = (float(2 ** (self.bit-1) - 1) * self.num_histogram_bins) / ((target_threshold + 0.5) * self.max)
-            print(self.scale)
+            self.scale = ((target_threshold + 0.5) * self.max) / ((target_bin - 1) * self.num_histogram_bins)
+            print(target_threshold, self.max, self.scale, self.max / self.scale, torch.round(self.max / self.scale))
         else:
             raise NotImplementedError(self.quant_mode + ' is not Implemented! ')
 
