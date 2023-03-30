@@ -59,7 +59,8 @@ if __name__ == "__main__":
 
     # device = torch.device("cpu")
     since = time.time()
-    acc = eval_model(model, eval_loader, device)
+    for _ in range(10):
+        acc = eval_model(model, eval_loader, device)
     time_elapsed = time.time() - since
     print('float model Acc: {:.4f}, eval complete in  {:.0f}s'.format(acc, time_elapsed))
 
@@ -68,14 +69,16 @@ if __name__ == "__main__":
     fuse_model =  ptq.fuse()
 
     since = time.time()
-    acc = eval_model(ptq.model, eval_loader, device)
+    for _ in range(10):
+        acc = eval_model(ptq.model, eval_loader, device)
     time_elapsed = time.time() - since
     print('fuse model Acc: {:.4f}, eval complete in  {:.0f}s'.format(acc, time_elapsed))
 
     quantized_model = ptq.quantize()
 
     since = time.time()
-    acc = eval_model(quantized_model, eval_loader, device)
+    for _ in range(10):
+        acc = eval_model(ptq.model, eval_loader, device)
     time_elapsed = time.time() - since
     print('quant model Acc: {:.4f}, eval complete in {:.0f}s'.format(acc, time_elapsed))
 
