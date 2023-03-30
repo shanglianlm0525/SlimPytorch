@@ -160,7 +160,7 @@ class PTQ():
             eval_model(self.model, self.calibration_data, self.device)
 
             # self.model.apply(quantize_act_run)
-            self.model = quantize_act_run1(self.model)
+            quantize_act_run1(self.model)
         else:
             raise NotImplementedError(self.a_scheme + ' is not Implemented! ')
 
@@ -172,8 +172,7 @@ def quantize_act_run1(model):
         if isinstance(child, (QConv2d, QLinear)):
             child.quantize_act_run()
         else:
-            model = quantize_act_run1(child)
-    return model
+            quantize_act_run1(child)
 
 
 def get_input_sequences(model, dummy_shape=[1, 3, 224, 224], device=None):
